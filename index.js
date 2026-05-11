@@ -170,8 +170,13 @@ bot.command('categorias', (ctx) => {
   )
 })
 
-bot.launch()
-console.log('Bot rodando...')
-
-process.once('SIGINT', () => bot.stop('SIGINT'))
-process.once('SIGTERM', () => bot.stop('SIGTERM'))
+const http = require('http')
+const PORT = process.env.PORT || 3000
+http.createServer((req, res) => {
+  res.writeHead(200)
+  res.end('ok')
+}).listen(PORT, () => {
+  console.log(`Servidor rodando na porta ${PORT}`)
+  bot.launch()
+  console.log('Bot rodando...')
+})
