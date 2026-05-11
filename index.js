@@ -149,4 +149,9 @@ if (process.env.NODE_ENV === 'production') {
 } else {
   bot.launch()
   console.log('Bot rodando com polling...')
+  const PORT = process.env.PORT || 3000
+bot.launch()
+console.log('Bot rodando...')
+process.once('SIGINT', () => bot.stop('SIGINT'))
+process.once('SIGTERM', () => bot.stop('SIGTERM'))
 }
