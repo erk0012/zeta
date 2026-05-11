@@ -1,26 +1,26 @@
 const { Telegraf } = require('telegraf')
-const fs = require('fs')
-const path = require('path')
-
-const DATA_DIR = path.join(__dirname, 'data')
-const EXPENSES_FILE = path.join(DATA_DIR, 'expenses.json')
-
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true })
-if (!fs.existsSync(EXPENSES_FILE)) fs.writeFileSync(EXPENSES_FILE, '[]')
-
-function readExpenses() {
-  return JSON.parse(fs.readFileSync(EXPENSES_FILE, 'utf-8'))
-}
-
-function writeExpenses(expenses) {
-  fs.writeFileSync(EXPENSES_FILE, JSON.stringify(expenses, null, 2))
-}
+const mongoose = require('mongoose')
 
 const CATEGORIES = [
   'Alimentação', 'Transporte', 'Moradia', 'Saúde',
   'Educação', 'Lazer', 'Compras', 'Assinaturas',
   'Salário', 'Investimentos', 'Outros'
 ]
+
+const expenseSchema = new mongoose.Schema({
+  userId: Number,
+  amount: Number,
+  category: String,
+  description: String,
+  date: { type: Date, default: Date.now }
+})
+
+const Expense = mongoose.model('Expense', expenseSchema)
+
+async function connectDB() {
+  await mongoose.connect(process.env.MONGODB_URI)
+  console.log('MongoDB conectado')
+}
 
 const bot = new Telegraf(process.env.BOT_TOKEN)
 
@@ -47,7 +47,7 @@ bot.help((ctx) => {
   )
 })
 
-bot.command('add', (ctx) => {
+bot.command('add', async (ctx) => {
   const text = ctx.message.text.replace('/add', '').trim()
   if (!text) {
     return ctx.reply('Uso: /add <valor> <categoria> <descrição>\nExemplo: /add 25.50 Alimentação Almoço')
@@ -62,52 +62,48 @@ bot.command('add', (ctx) => {
   const category = parts[1] || 'Outros'
   const description = parts.slice(2).join(' ') || category
 
-  const expense = {
-    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+  await Expense.create({
     userId: ctx.from.id,
     amount: Math.round(amount * 100) / 100,
     category,
-    description,
-    date: new Date().toISOString()
-  }
-
-  const expenses = readExpenses()
-  expenses.push(expense)
-  writeExpenses(expenses)
+    description
+  })
 
   ctx.reply(
     `✅ Gasto registrado!\n\n` +
-    `Valor: R$ ${expense.amount.toFixed(2)}\n` +
+    `Valor: R$ ${amount.toFixed(2)}\n` +
     `Categoria: ${category}\n` +
     `Descrição: ${description}`
   )
 })
 
-bot.command('hoje', (ctx) => {
-  const expenses = readExpenses()
+bot.command('hoje', async (ctx) => {
   const today = new Date()
-  const todayStr = today.toISOString().slice(0, 10)
+  today.setHours(0, 0, 0, 0)
+  const tomorrow = new Date(today)
+  tomorrow.setDate(tomorrow.getDate() + 1)
 
-  const todayExpenses = expenses.filter(
-    e => e.userId === ctx.from.id && e.date.slice(0, 10) === todayStr
-  )
+  const expenses = await Expense.find({
+    userId: ctx.from.id,
+    date: { $gte: today, $lt: tomorrow }
+  })
 
-  if (todayExpenses.length === 0) {
+  if (expenses.length === 0) {
     return ctx.reply('Nenhum gasto registrado hoje.')
   }
 
-  const total = todayExpenses.reduce((s, e) => s + e.amount, 0)
-  const lines = todayExpenses.map((e, i) =>
+  const total = expenses.reduce((s, e) => s + e.amount, 0)
+  const lines = expenses.map((e, i) =>
     `${i + 1}. R$ ${e.amount.toFixed(2)} - ${e.category} - ${e.description}`
   )
 
   ctx.reply(
-    `📅 Gastos de hoje (${todayStr}):\n\n${lines.join('\n')}\n\n` +
+    `📅 Gastos de hoje:\n\n${lines.join('\n')}\n\n` +
     `Total: R$ ${total.toFixed(2)}`
   )
 })
 
-bot.command('mes', (ctx) => {
+bot.command('mes', async (ctx) => {
   const text = ctx.message.text.replace('/mes', '').trim()
   const now = new Date()
   let month = now.getMonth()
@@ -122,15 +118,16 @@ bot.command('mes', (ctx) => {
     }
   }
 
-  const monthStr = String(month + 1).padStart(2, '0')
-  const prefix = `${year}-${monthStr}`
+  const start = new Date(year, month, 1)
+  const end = new Date(year, month + 1, 1)
 
-  const expenses = readExpenses().filter(
-    e => e.userId === ctx.from.id && e.date.startsWith(prefix)
-  )
+  const expenses = await Expense.find({
+    userId: ctx.from.id,
+    date: { $gte: start, $lt: end }
+  })
 
   if (expenses.length === 0) {
-    return ctx.reply(`Nenhum gasto em ${monthStr}/${year}.`)
+    return ctx.reply(`Nenhum gasto em ${String(month + 1).padStart(2, '0')}/${year}.`)
   }
 
   const total = expenses.reduce((s, e) => s + e.amount, 0)
@@ -144,25 +141,26 @@ bot.command('mes', (ctx) => {
     .map(([cat, val]) => `${cat}: R$ ${val.toFixed(2)}`)
 
   ctx.reply(
-    `📊 Resumo de ${monthStr}/${year}:\n\n` +
+    `📊 Resumo de ${String(month + 1).padStart(2, '0')}/${year}:\n\n` +
     `${catLines.join('\n')}\n\n` +
     `Total: R$ ${total.toFixed(2)}\n` +
     `Registros: ${expenses.length}`
   )
 })
 
-bot.command('categorias', (ctx) => {
-  const expenses = readExpenses().filter(e => e.userId === ctx.from.id)
-  const byCategory = {}
-  for (const e of expenses) {
-    byCategory[e.category] = (byCategory[e.category] || 0) + e.amount
+bot.command('categorias', async (ctx) => {
+  const result = await Expense.aggregate([
+    { $match: { userId: ctx.from.id } },
+    { $group: { _id: '$category', total: { $sum: '$amount' } } },
+    { $sort: { total: -1 } }
+  ])
+
+  if (result.length === 0) {
+    return ctx.reply('Nenhum gasto registrado ainda.')
   }
 
-  const lines = Object.entries(byCategory)
-    .sort((a, b) => b[1] - a[1])
-    .map(([cat, val]) => `${cat}: R$ ${val.toFixed(2)}`)
-
-  const total = expenses.reduce((s, e) => s + e.amount, 0)
+  const lines = result.map(r => `${r._id}: R$ ${r.total.toFixed(2)}`)
+  const total = result.reduce((s, r) => s + r.total, 0)
 
   ctx.reply(
     `📂 Todas as categorias:\n\n${lines.join('\n')}\n\n` +
@@ -172,11 +170,16 @@ bot.command('categorias', (ctx) => {
 
 const http = require('http')
 const PORT = process.env.PORT || 3000
+
 http.createServer((req, res) => {
   res.writeHead(200)
   res.end('ok')
-}).listen(PORT, () => {
+}).listen(PORT, async () => {
   console.log(`Servidor rodando na porta ${PORT}`)
+  await connectDB()
   bot.launch()
   console.log('Bot rodando...')
 })
+
+process.once('SIGINT', () => bot.stop('SIGINT'))
+process.once('SIGTERM', () => bot.stop('SIGTERM'))
